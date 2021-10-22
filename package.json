@@ -1,0 +1,28 @@
+{
+  "name": "@knockaway/gh-action-promotion-pr-params",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/knockaway/gh-action-promotion-pr-params.git"
+  },
+  "author": "scmorse",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/knockaway/gh-action-promotion-pr-params/issues"
+  },
+  "homepage": "https://github.com/knockaway/gh-action-promotion-pr-params#readme",
+  "dependencies": {
+    "@actions/core": "^1.6.0",
+    "@actions/github": "^5.0.0"
+  },
+  "devDependencies": {
+    "prettier": "^2.4.1",
+    "sinon": "^11.1.2",
+    "tap": "^15.0.10"
+  }
+}
