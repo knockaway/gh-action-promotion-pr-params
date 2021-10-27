@@ -1,37 +1,35 @@
 'use strict';
 
-const actionsCore = require('@actions/core');
-const actionsGithub = require('@actions/github');
+const core = require('@actions/core');
+const github = require('@actions/github');
 
-module.exports = main;
+module.exports = { main };
+
+/**
+ * @typedef {import("@octokit/plugin-rest-endpoint-methods/dist-types/generated/method-types").RestEndpointMethods} GitHubRest
+ */
+/**
+ * @typedef {Object} Context
+ *   @property {import("@actions/core")} core
+ *   @property {GitHubRest} githubRest
+ *   @property {String} owner
+ *   @property {String} repo
+ */
 
 if (require.main === module) {
-  main().catch();
+  const githubRest = github.getOctokit(core.getInput('github_token', { required: true })).rest;
+  main({ ctx: { core, githubRest, owner: github.context.repo.owner, repo: github.context.repo.repo } }).catch();
 }
 
-async function main({
-  core = actionsCore,
-  github = actionsGithub,
-  owner = github.context.repo.owner,
-  repo = github.context.repo.repo,
-} = {}) {
+/**
+ * @param {Context} ctx
+ */
+async function main({ ctx }) {
+  const { core, githubRest, owner, repo } = ctx;
   try {
-    const headRef = core.getInput('pr_source_branch');
-    if (!headRef) {
-      throw new Error('pr_source_branch is required');
-    }
-
-    const baseRef = core.getInput('pr_destination_branch');
-    if (!baseRef) {
-      throw new Error('pr_destination_branch is required');
-    }
-
+    const headRef = core.getInput('pr_source_branch', { required: true });
+    const baseRef = core.getInput('pr_destination_branch', { required: true });
     const mergeDescriptionBranch = core.getInput('describe_merges_into_branch') || 'master';
-
-    const octokit = github.getOctokit(core.getInput('github_token'));
-
-    /** @type import("@octokit/plugin-rest-endpoint-methods/dist-types/generated/method-types").RestEndpointMethods */
-    const githubRest = octokit.rest;
 
     const prNumbersOfMerges = new Set();
     const committers = new Set();
@@ -39,7 +37,7 @@ async function main({
     let page = 1;
     const per_page = 15;
     while (true) {
-      console.log(`Requesting page ${page} of commits for ${headRef}...${baseRef}`);
+      core.info(`Requesting page ${page} of commits for ${headRef}...${baseRef}`);
       const {
         data: { commits },
       } = await githubRest.repos.compareCommitsWithBasehead({
@@ -49,7 +47,7 @@ async function main({
         page,
         per_page,
       });
-      console.log(`Found ${commits.length} commits on page ${page} of commits for ${headRef}...${baseRef}`);
+      core.info(`Found ${commits.length} commits on page ${page} of commits for ${headRef}...${baseRef}`);
 
       for (const { commit, author } of commits) {
         const message = commit && commit.message;
@@ -81,7 +79,7 @@ async function main({
       } = await githubRest.pulls.get({ owner, repo, pull_number: Number(prNumberOfMerge), per_page: 1 });
 
       if (base.ref !== mergeDescriptionBranch) {
-        console.log(
+        core.info(
           `Skipping PR #${prNumberOfMerge} because it merges into ${base.ref} instead of ${mergeDescriptionBranch}`,
         );
         continue;
@@ -91,16 +89,16 @@ async function main({
     }
 
     const commitSummary = prLines.map(line => ` - ${line}`).join('\n');
-    console.log(`Generated commit summary for ${headRef}...${baseRef}:\n${commitSummary}`);
+    core.info(`Generated commit summary for ${headRef}...${baseRef}:\n${commitSummary}`);
 
     const committersCsv = [...committers].join(',');
-    console.log(`Found these committers in the diff for ${headRef}...${baseRef}:\n${committersCsv}`);
+    core.info(`Found these committers in the diff for ${headRef}...${baseRef}:\n${committersCsv}`);
 
     core.setOutput('merge_commits_summary', commitSummary);
     core.setOutput('merge_commits_summary_json', JSON.stringify({ PROMOTION_PR_COMMIT_SUMMARY: commitSummary }));
     core.setOutput('committers_csv', committersCsv);
   } catch (error) {
-    console.error(error);
+    core.error(error);
     core.setFailed(error.message);
     process.exit(1);
   }
