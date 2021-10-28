@@ -31,7 +31,7 @@ jobs:
 
       - name: Build Promotion PR Params
         id: promotion_pr_params
-        uses: knockaway/gh-action-promotion-pr-params@v1.0.0
+        uses: knockaway/gh-action-promotion-pr-params@v1.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           pr_source_branch: ${{ env.HEAD_BRANCH }}
@@ -48,6 +48,7 @@ jobs:
           create_pr_body: '<!-- PROMOTION_PR_COMMIT_SUMMARY_START --><!-- PROMOTION_PR_COMMIT_SUMMARY_END -->'
           create_pr_reviewers: ${{ steps.promotion_pr_params.outputs.committers_csv }}
           update_pr_reviewers: ${{ steps.promotion_pr_params.outputs.committers_csv }}
+          update_pr_rerequest_reviewers: ${{ steps.promotion_pr_params.outputs.approvers_with_new_commits_csv }}
           create_pr_body_template_vars: ${{ steps.promotion_pr_params.outputs.merge_commits_summary_json }}
           update_pr_body_template_vars: ${{ steps.promotion_pr_params.outputs.merge_commits_summary_json }}
 ```
@@ -96,3 +97,11 @@ pr_source_branch and pr_destination_branch.
 
 Intended to be used with [create_pr_reviewers](https://github.com/knockaway/upsert-pr-action#create_pr_reviewers)
 / [update_pr_reviewers](https://github.com/knockaway/upsert-pr-action#update_pr_reviewers).
+
+### `approvers_with_new_commits_csv`
+
+A comma separated list of the GitHub users who approved the promotion of their commits, but
+since the time of their review submitted new commits to the promotion PR.
+
+Intended to be used with [update_pr_rerequest_reviewers](
+https://github.com/knockaway/gh-action-upsert-pr#update_pr_rerequest_reviewers).

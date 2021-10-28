@@ -1,8 +1,8 @@
 name: 'Promotion PR Description Action'
 description: 'Creates a summary of merge commits and a CSV of committers that contributed.'
 branding:
-  icon: "git-pull-request"
-  color: "purple"
+  icon: 'git-pull-request'
+  color: 'purple'
 inputs:
   github_token:
     description: 'Token to be used in the GitHub API calls.'
@@ -24,6 +24,8 @@ outputs:
     description: 'merge_commits_summary in JSON format: { "PROMOTION_PR_COMMIT_SUMMARY": merge_commits_summary }'
   committers_csv:
     description: 'A comma separated list of the GitHub users who committed in the diff between pr_source_branch and pr_destination_branch'
+  approvers_with_new_commits_csv:
+    description: 'A comma separated list of the GitHub users who approved the promotion of their commits, but since the time of their review submitted new commits to the promotion PR.'
 runs:
   using: 'node12'
   main: 'index.js'
