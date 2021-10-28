@@ -31,7 +31,7 @@ jobs:
 
       - name: Build Promotion PR Params
         id: promotion_pr_params
-        uses: knockaway/gh-action-promotion-pr-params@v1.0.0
+        uses: knockaway/gh-action-promotion-pr-params@v1.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           pr_source_branch: ${{ env.HEAD_BRANCH }}
