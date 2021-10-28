@@ -86,6 +86,7 @@ async function main({ ctx }) {
 
       page = 1;
       while (true) {
+        core.debug(`Fetching page ${page} of PRs matching q: ${q}`);
         const {
           data: { incomplete_results, items: prs },
         } = await githubRest.search.issuesAndPullRequests({ q, per_page, page });
