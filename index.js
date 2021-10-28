@@ -36,9 +36,9 @@ async function main({ ctx }) {
     } = await githubRest.pulls.list({ owner, repo, base: baseRef, head: headRef });
     const approvingReviewers = existingPr ? await findReviewersCurrentlyApproving({ ctx, existingPr }) : new Map();
 
-    const prNumbersOfMerges = new Set();
     const committers = new Set();
     const approversWithNewCommits = new Set();
+    const commitShas = [];
 
     let page = 1;
     const per_page = 15;
@@ -55,17 +55,8 @@ async function main({ ctx }) {
       });
       core.info(`Found ${commits.length} commits on page ${page} of commits for ${headRef}...${baseRef}`);
 
-      for (const { commit, author } of commits) {
-        const message = commit && commit.message;
-        if (message) {
-          if (message.startsWith('Merge pull request #')) {
-            // in standard merge commits, the PR# comes after 'Merge pull request'
-            prNumbersOfMerges.add(message.match(/^Merge pull request #(\d*) /)[1]);
-          } else if (message.match(/^.*\(#(\d*)\)$/m)) {
-            // in squash merge commits, the PR# is at the end of the first line
-            prNumbersOfMerges.add(message.match(/^.*\(#(\d*)\)$/m)[1]);
-          }
-        }
+      for (const { sha, commit, author } of commits) {
+        commitShas.push(sha.slice(0, 7));
 
         if (author && author.login && isLoginPermissible(author.login)) {
           committers.add(author.login);
@@ -84,20 +75,35 @@ async function main({ ctx }) {
       page++;
     }
 
-    const prLines = [];
-    for (const prNumberOfMerge of prNumbersOfMerges) {
-      const {
-        data: { title, html_url, base },
-      } = await githubRest.pulls.get({ owner, repo, pull_number: Number(prNumberOfMerge), per_page: 1 });
+    const prNumberToPr = new Map();
+    while (commitShas.length > 0) {
+      let q = `repo:${owner}/${repo}+type:pr+is:merged+base:${mergeDescriptionBranch}`;
 
-      if (base.ref !== mergeDescriptionBranch) {
-        core.info(
-          `Skipping PR #${prNumberOfMerge} because it merges into ${base.ref} instead of ${mergeDescriptionBranch}`,
-        );
-        continue;
+      // max query search length is 256
+      while (commitShas.length > 0 && q.length < 256 - 8) {
+        q += `+${commitShas.pop()}`;
       }
 
-      prLines.push(`[#${prNumberOfMerge}](${html_url}): ${title}`);
+      page = 1;
+      while (true) {
+        core.debug(`Fetching page ${page} of PRs matching q: ${q}`);
+        const {
+          data: { incomplete_results, items: prs },
+        } = await githubRest.search.issuesAndPullRequests({ q, per_page, page });
+
+        for (const pr of prs) {
+          prNumberToPr.set(pr.number, pr);
+        }
+
+        if (!incomplete_results) {
+          break;
+        }
+      }
+    }
+
+    const prLines = [];
+    for (const pr of [...prNumberToPr.values()].sort(byClosedAtDesc)) {
+      prLines.push(`[#${pr.number}](${pr.html_url}): ${pr.title}`);
     }
 
     const commitSummary = prLines.map(line => ` - ${line}`).join('\n');
@@ -131,6 +137,16 @@ function isLoginPermissible(login) {
     return false;
   }
   return !login.includes('dependabot');
+}
+
+function byClosedAtDesc(a, b) {
+  if (a.closed_at < b.closed_at) {
+    return -1;
+  }
+  if (a.closed_at > b.closed_at) {
+    return 1;
+  }
+  return 0;
 }
 
 /**
