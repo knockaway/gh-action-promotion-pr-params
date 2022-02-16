@@ -103,7 +103,7 @@ async function main({ ctx }) {
 
     const prLines = [];
     for (const pr of [...prNumberToPr.values()].sort(byClosedAtDesc)) {
-      if (pr.user?.login && isLoginPermissible(pr.user.login)) {
+      if (pr.user && pr.user.login && isLoginPermissible(pr.user.login)) {
         prLines.push(`[#${pr.number}](${pr.html_url}) by @${pr.user.login}: ${pr.title}`);
       } else {
         prLines.push(`[#${pr.number}](${pr.html_url}): ${pr.title}`);
