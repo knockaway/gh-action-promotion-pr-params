@@ -77,8 +77,8 @@ Focus the summary on merges into this branch. Default: 'master'
 
 The summary of merge commits into {describe_merges_into_branch}. Example:
 
- - [#1](https://github.com/knockaway/gh-action-promotion-pr-params/pull/1): Add example section to merge_commits_summary
- - [#2](https://github.com/knockaway/gh-action-promotion-pr-params/pull/2): Update example section in merge_commits_summary
+ - [#1](https://github.com/knockaway/gh-action-promotion-pr-params/pull/1) by @user1: Add example section to merge_commits_summary
+ - [#2](https://github.com/knockaway/gh-action-promotion-pr-params/pull/2) by @user2: Update example section in merge_commits_summary
 
 ### `merge_commits_summary_json`
 
