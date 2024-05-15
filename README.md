@@ -27,11 +27,11 @@ jobs:
           echo "HEAD_BRANCH=$HEAD_BRANCH" >> $GITHUB_ENV
 
       - name: Check out repository code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Build Promotion PR Params
         id: promotion_pr_params
-        uses: knockaway/gh-action-promotion-pr-params@v1.3.0
+        uses: knockaway/gh-action-promotion-pr-params@v2.0.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           pr_source_branch: ${{ env.HEAD_BRANCH }}
@@ -39,7 +39,7 @@ jobs:
 
       - name: Create or Update PR
         id: upsert_pr
-        uses: knockaway/gh-action-upsert-pr@v1.2.0
+        uses: knockaway/gh-action-upsert-pr@v2.0.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           pr_source_branch: ${{ env.HEAD_BRANCH }}
