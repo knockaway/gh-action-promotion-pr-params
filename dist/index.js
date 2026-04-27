@@ -143,16 +143,15 @@ function byClosedAtDesc(a, b) {
 /**
  * Resolve which merged PRs introduced the given commits.
  *
- * We extract PR numbers directly from merge commit messages rather than calling
- * `repos.listPullRequestsAssociatedWithCommit` or GraphQL `associatedPullRequests`.
- * Both endpoints depend on a backend index that lags 20+ minutes after a merge and
- * also returns intermittent 500s, so just-merged PRs would be silently dropped from
- * the summary. Commit messages are git data — present immediately and never flaky.
+ * Primary: regex-parse the PR number out of merge commit messages
+ *   ("Merge pull request #N from ..." or "Title (#N)"). Commit messages are git data,
+ *   immediately available and never flaky.
  *
- * Standard merge commits ("Merge pull request #N from ...") and squash-merge commits
- * ("Title (#N)") are both matched. Rebase merges (which don't preserve a PR ref in
- * any commit message) are not detected; this action's primary use case is promotion
- * PRs in repos that use merge or squash strategies.
+ * Fallback: for any commit the regex didn't match (rebase merges, direct pushes, or
+ *   unrecognized message formats), call `repos.listPullRequestsAssociatedWithCommit`
+ *   on a best-effort basis. Wrapped in try/catch so backend incidents (the API has
+ *   been intermittently 5xx during elasticsearch outages) don't fail the run — we
+ *   just log and continue without that commit's PR.
  *
  * @param {Object} args
  * @param {Context} args.ctx
@@ -162,6 +161,7 @@ function byClosedAtDesc(a, b) {
 async function lookupAssociatedPRs({ ctx, commits, mergeDescriptionBranch }) {
   const { core, githubRest, owner, repo } = ctx;
   const prNumbers = new Set();
+  const unmatchedShas = [];
 
   for (const c of commits) {
     const subject = c.commit && c.commit.message ? c.commit.message.split('\n')[0] : '';
@@ -171,6 +171,25 @@ async function lookupAssociatedPRs({ ctx, commits, mergeDescriptionBranch }) {
       prNumbers.add(Number(standardMerge[1]));
     } else if (squashMerge) {
       prNumbers.add(Number(squashMerge[1]));
+    } else {
+      unmatchedShas.push(c.sha);
+    }
+  }
+
+  for (const sha of unmatchedShas) {
+    try {
+      const { data: prs } = await githubRest.repos.listPullRequestsAssociatedWithCommit({
+        owner,
+        repo,
+        commit_sha: sha,
+      });
+      for (const pr of prs) {
+        if (pr.merged_at && pr.base && pr.base.ref === mergeDescriptionBranch) {
+          prNumbers.add(pr.number);
+        }
+      }
+    } catch (err) {
+      core.warning(`Could not look up PRs for commit ${sha.slice(0, 7)}: ${err.message}`);
     }
   }
 

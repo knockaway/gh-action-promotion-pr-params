@@ -30,6 +30,9 @@ function buildContext(overrides = {}) {
       repos: {
         compareCommitsWithBasehead:
           overrides.compareCommitsWithBasehead || sinon.stub().resolves({ data: { commits: [] } }),
+        listPullRequestsAssociatedWithCommit:
+          overrides.listPullRequestsAssociatedWithCommit ||
+          sinon.stub().rejects(new Error('unexpected listPullRequestsAssociatedWithCommit call')),
       },
     },
     owner: 'knockaway',
@@ -188,16 +191,59 @@ tap.test('logs a warning and emits {} when pulls.get fails for the only PR', asy
   t.equal(summaryJsonCall.args[1], '{}', 'preserves existing body when lookup fails');
 });
 
-tap.test('skips commits without a parseable PR ref instead of failing', async t => {
+tap.test('falls back to listPullRequestsAssociatedWithCommit for commits not matched by regex', async t => {
   const ctx = buildContext({
     compareCommitsWithBasehead: sinon.stub().resolves({
       data: {
         commits: [
-          fakeAuthorCommit({ sha: '1'.repeat(40), msg: 'direct push to master' }),
+          fakeAuthorCommit({ sha: '1'.repeat(40), msg: 'rebase-merged commit with no PR ref' }),
+        ],
+      },
+    }),
+    listPullRequestsAssociatedWithCommit: sinon.stub().resolves({
+      data: [
+        {
+          number: 55,
+          merged_at: '2026-04-27T17:00:00Z',
+          base: { ref: 'master' },
+        },
+      ],
+    }),
+    pullsGet: sinon.stub().resolves({
+      data: {
+        number: 55,
+        title: 'rebase-merged feature',
+        html_url: 'https://example/pull/55',
+        merged_at: '2026-04-27T17:00:00Z',
+        closed_at: '2026-04-27T17:00:00Z',
+        base: { ref: 'master' },
+        user: { login: 'pkat' },
+      },
+    }),
+  });
+
+  await main({ ctx });
+
+  t.notOk(ctx.core.setFailed.called, 'setFailed not called');
+  t.ok(
+    ctx.githubRest.repos.listPullRequestsAssociatedWithCommit.calledOnce,
+    'fallback API was called for the unmatched commit'
+  );
+  const summary = ctx.core.setOutput.getCalls().find(c => c.args[0] === 'merge_commits_summary').args[1];
+  t.match(summary, /#55/, 'PR found via fallback is in the summary');
+});
+
+tap.test('continues gracefully when fallback API throws', async t => {
+  const ctx = buildContext({
+    compareCommitsWithBasehead: sinon.stub().resolves({
+      data: {
+        commits: [
+          fakeAuthorCommit({ sha: '1'.repeat(40), msg: 'direct push to master, no PR' }),
           fakeMergeCommit({ sha: '2'.repeat(40), prNumber: 100 }),
         ],
       },
     }),
+    listPullRequestsAssociatedWithCommit: sinon.stub().rejects(new Error('500 Internal Server Error')),
     pullsGet: sinon.stub().resolves({
       data: {
         number: 100,
@@ -213,7 +259,9 @@ tap.test('skips commits without a parseable PR ref instead of failing', async t 
 
   await main({ ctx });
 
-  t.equal(ctx.githubRest.pulls.get.callCount, 1, 'only the parseable PR triggers a lookup');
+  t.notOk(ctx.core.setFailed.called, 'main does not fail when the fallback API errors');
+  t.ok(ctx.core.warning.called, 'warning logged for the failed fallback lookup');
+  t.equal(ctx.githubRest.pulls.get.callCount, 1, 'still resolves the regex-matched PR');
   const summary = ctx.core.setOutput.getCalls().find(c => c.args[0] === 'merge_commits_summary').args[1];
-  t.match(summary, /#100/);
+  t.match(summary, /#100/, 'regex-matched PR survives a fallback failure');
 });
