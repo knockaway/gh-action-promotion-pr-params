@@ -38,7 +38,7 @@ async function main({ ctx }) {
 
     const committers = new Set();
     const approversWithNewCommits = new Set();
-    const commitShas = [];
+    const allCommits = [];
 
     let page = 1;
     const per_page = 15;
@@ -55,9 +55,10 @@ async function main({ ctx }) {
       });
       core.info(`Found ${commits.length} commits on page ${page} of commits for ${headRef}...${baseRef}`);
 
-      for (const { sha, commit, author } of commits) {
-        commitShas.push(sha.slice(0, 7));
+      for (const c of commits) {
+        allCommits.push(c);
 
+        const { author, commit } = c;
         if (author && author.login && isLoginPermissible(author.login)) {
           committers.add(author.login);
           if (
@@ -75,31 +76,7 @@ async function main({ ctx }) {
       page++;
     }
 
-    const prNumberToPr = new Map();
-    while (commitShas.length > 0) {
-      let q = `repo:${owner}/${repo}+type:pr+is:merged+base:${mergeDescriptionBranch}`;
-
-      // max query search length is 256
-      while (commitShas.length > 0 && q.length < 256 - 8) {
-        q += `+${commitShas.pop()}`;
-      }
-
-      page = 1;
-      while (true) {
-        core.debug(`Fetching page ${page} of PRs matching q: ${q}`);
-        const {
-          data: { incomplete_results, items: prs },
-        } = await githubRest.search.issuesAndPullRequests({ q, per_page, page });
-
-        for (const pr of prs) {
-          prNumberToPr.set(pr.number, pr);
-        }
-
-        if (!incomplete_results) {
-          break;
-        }
-      }
-    }
+    const prNumberToPr = await lookupAssociatedPRs({ ctx, commits: allCommits, mergeDescriptionBranch });
 
     const prLines = [];
     for (const pr of [...prNumberToPr.values()].sort(byClosedAtDesc)) {
@@ -120,7 +97,10 @@ async function main({ ctx }) {
     core.info(`Found these reviewers that approved and then added new commits:\n${approversWithNewCommitsCsv}`);
 
     core.setOutput('merge_commits_summary', commitSummary);
-    core.setOutput('merge_commits_summary_json', JSON.stringify({ PROMOTION_PR_COMMIT_SUMMARY: commitSummary }));
+    // When no PRs were resolved, emit empty template vars so callers using gh-action-upsert-pr leave
+    // the existing PR body untouched instead of clobbering a previously-populated summary.
+    const summaryJson = prLines.length === 0 ? '{}' : JSON.stringify({ PROMOTION_PR_COMMIT_SUMMARY: commitSummary });
+    core.setOutput('merge_commits_summary_json', summaryJson);
     core.setOutput('committers_csv', committersCsv);
     core.setOutput('approvers_with_new_commits_csv', approversWithNewCommitsCsv);
   } catch (error) {
@@ -151,6 +131,77 @@ function byClosedAtDesc(a, b) {
     return 1;
   }
   return 0;
+}
+
+/**
+ * Resolve which merged PRs introduced the given commits.
+ *
+ * Primary: regex-parse the PR number out of merge commit messages
+ *   ("Merge pull request #N from ..." or "Title (#N)"). Commit messages are git data,
+ *   immediately available and never flaky.
+ *
+ * Fallback: for any commit the regex didn't match (rebase merges, direct pushes, or
+ *   unrecognized message formats), call `repos.listPullRequestsAssociatedWithCommit`
+ *   on a best-effort basis. Wrapped in try/catch so backend incidents (the API has
+ *   been intermittently 5xx during elasticsearch outages) don't fail the run — we
+ *   just log and continue without that commit's PR.
+ *
+ * @param {Object} args
+ * @param {Context} args.ctx
+ * @param {Array} args.commits  raw items from compareCommitsWithBasehead
+ * @param {String} args.mergeDescriptionBranch
+ */
+async function lookupAssociatedPRs({ ctx, commits, mergeDescriptionBranch }) {
+  const { core, githubRest, owner, repo } = ctx;
+  const prNumbers = new Set();
+  const unmatchedShas = [];
+
+  for (const c of commits) {
+    const subject = c.commit && c.commit.message ? c.commit.message.split('\n')[0] : '';
+    const standardMerge = subject.match(/^Merge pull request #(\d+)/);
+    const squashMerge = subject.match(/\(#(\d+)\)\s*$/);
+    if (standardMerge) {
+      prNumbers.add(Number(standardMerge[1]));
+    } else if (squashMerge) {
+      prNumbers.add(Number(squashMerge[1]));
+    } else {
+      unmatchedShas.push(c.sha);
+    }
+  }
+
+  for (const sha of unmatchedShas) {
+    try {
+      const { data: prs } = await githubRest.repos.listPullRequestsAssociatedWithCommit({
+        owner,
+        repo,
+        commit_sha: sha,
+      });
+      for (const pr of prs) {
+        if (pr.merged_at && pr.base && pr.base.ref === mergeDescriptionBranch) {
+          prNumbers.add(pr.number);
+        }
+      }
+    } catch (err) {
+      core.warning(`Could not look up PRs for commit ${sha.slice(0, 7)}: ${err.message}`);
+    }
+  }
+
+  const prNumberToPr = new Map();
+  for (const num of prNumbers) {
+    let pr;
+    try {
+      const result = await githubRest.pulls.get({ owner, repo, pull_number: num });
+      pr = result.data;
+    } catch (err) {
+      core.warning(`Failed to fetch PR #${num}: ${err.message}`);
+      continue;
+    }
+    if (pr.merged_at && pr.base && pr.base.ref === mergeDescriptionBranch) {
+      prNumberToPr.set(pr.number, pr);
+    }
+  }
+
+  return prNumberToPr;
 }
 
 /**
