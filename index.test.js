@@ -23,145 +23,143 @@ function buildContext(overrides = {}) {
       error: sinon.stub(),
     },
     githubRest: {
-      pulls: { list: sinon.stub().resolves({ data: [] }) },
+      pulls: {
+        list: sinon.stub().resolves({ data: [] }),
+        get: overrides.pullsGet || sinon.stub().rejects(new Error('unexpected pulls.get call')),
+      },
       repos: {
         compareCommitsWithBasehead:
           overrides.compareCommitsWithBasehead || sinon.stub().resolves({ data: { commits: [] } }),
       },
     },
-    graphql: overrides.graphql || sinon.stub().resolves({ repository: {} }),
     owner: 'knockaway',
     repo: 'gh-action-promotion-pr-params',
   };
 }
 
-tap.test('emits empty template vars when no commits are in the diff', async t => {
+function fakeMergeCommit({ sha, prNumber, branch = 'pkat/something', author = 'pkat', date = '2026-04-27T17:00:00Z' }) {
+  return {
+    sha,
+    commit: { author: { date }, message: `Merge pull request #${prNumber} from knockaway/${branch}` },
+    author: { login: author },
+    parents: [{}, {}],
+  };
+}
+
+function fakeAuthorCommit({ sha, msg, author = 'dependabot', date = '2026-04-27T17:00:00Z' }) {
+  return {
+    sha,
+    commit: { author: { date }, message: msg },
+    author: { login: author },
+    parents: [{}],
+  };
+}
+
+tap.test('emits {} when no commits are in the diff', async t => {
   const ctx = buildContext();
   await main({ ctx });
 
   t.notOk(ctx.core.setFailed.called, 'setFailed not called');
   const summaryJsonCall = ctx.core.setOutput.getCalls().find(c => c.args[0] === 'merge_commits_summary_json');
   t.equal(summaryJsonCall.args[1], '{}', 'no commits → {}');
-  t.notOk(ctx.graphql.called, 'graphql is not called when there are no commits');
+  t.notOk(ctx.githubRest.pulls.get.called, 'pulls.get is not called when there are no commits');
 });
 
-tap.test('emits empty template vars when GraphQL throws (preserves existing PR body)', async t => {
+tap.test('extracts PR numbers from standard merge commit messages and looks them up', async t => {
   const ctx = buildContext({
     compareCommitsWithBasehead: sinon.stub().resolves({
       data: {
         commits: [
-          {
-            sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-            commit: { author: { date: '2026-04-27T17:00:00Z' } },
-            author: { login: 'pkat' },
-          },
+          fakeAuthorCommit({ sha: 'a'.repeat(40), msg: 'fix(deps): bump dd-trace from 5.94.0 to 5.97.0' }),
+          fakeMergeCommit({ sha: 'b'.repeat(40), prNumber: 227 }),
+          fakeAuthorCommit({ sha: 'c'.repeat(40), msg: 'fix(deps): bump dd-trace from 5.97.0 to 5.98.0' }),
+          fakeMergeCommit({ sha: 'd'.repeat(40), prNumber: 229, date: '2026-04-27T18:00:00Z' }),
         ],
       },
     }),
-    graphql: sinon.stub().rejects(new Error('500 Internal Server Error')),
-  });
-
-  await main({ ctx });
-
-  t.notOk(ctx.core.setFailed.called, 'main does not fail when GraphQL is down');
-  t.ok(ctx.core.warning.called, 'logs a warning about the failed lookup');
-  const summaryJsonCall = ctx.core.setOutput.getCalls().find(c => c.args[0] === 'merge_commits_summary_json');
-  t.equal(summaryJsonCall.args[1], '{}', 'emits {} so the upsert action preserves the existing body');
-});
-
-tap.test('builds a summary line for each PR returned by GraphQL', async t => {
-  const ctx = buildContext({
-    compareCommitsWithBasehead: sinon.stub().resolves({
-      data: {
-        commits: [
-          {
-            sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-            commit: { author: { date: '2026-04-27T17:00:00Z' } },
-            author: { login: 'pkat' },
-          },
-          {
-            sha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-            commit: { author: { date: '2026-04-27T17:05:00Z' } },
-            author: { login: 'pkat' },
-          },
-        ],
-      },
-    }),
-    graphql: sinon.stub().resolves({
-      repository: {
-        c0: {
-          associatedPullRequests: {
-            nodes: [
-              {
-                number: 227,
-                title: 'fix(deps): bump dd-trace from 5.94.0 to 5.97.0',
-                url: 'https://example/pull/227',
-                mergedAt: '2026-04-23T19:01:00Z',
-                closedAt: '2026-04-23T19:01:00Z',
-                baseRefName: 'master',
-                author: { login: 'dependabot' },
-              },
-            ],
-          },
+    pullsGet: sinon.stub().callsFake(({ pull_number }) => {
+      const data = {
+        227: {
+          number: 227,
+          title: 'fix(deps): bump dd-trace from 5.94.0 to 5.97.0',
+          html_url: 'https://example/pull/227',
+          merged_at: '2026-04-23T19:01:00Z',
+          closed_at: '2026-04-23T19:01:00Z',
+          base: { ref: 'master' },
+          user: { login: 'dependabot[bot]' },
         },
-        c1: {
-          associatedPullRequests: {
-            nodes: [
-              {
-                number: 229,
-                title: 'fix(deps): bump dd-trace from 5.97.0 to 5.98.0',
-                url: 'https://example/pull/229',
-                mergedAt: '2026-04-27T17:53:58Z',
-                closedAt: '2026-04-27T17:53:58Z',
-                baseRefName: 'master',
-                author: { login: 'dependabot' },
-              },
-            ],
-          },
+        229: {
+          number: 229,
+          title: 'fix(deps): bump dd-trace from 5.97.0 to 5.98.0',
+          html_url: 'https://example/pull/229',
+          merged_at: '2026-04-27T17:53:58Z',
+          closed_at: '2026-04-27T17:53:58Z',
+          base: { ref: 'master' },
+          user: { login: 'dependabot[bot]' },
         },
-      },
+      };
+      return Promise.resolve({ data: data[pull_number] });
     }),
   });
 
   await main({ ctx });
 
   t.notOk(ctx.core.setFailed.called, 'setFailed not called');
-  const summaryCall = ctx.core.setOutput.getCalls().find(c => c.args[0] === 'merge_commits_summary');
-  t.match(summaryCall.args[1], /#227/, 'PR #227 listed');
-  t.match(summaryCall.args[1], /#229/, 'PR #229 listed');
-  t.notMatch(summaryCall.args[1], /by @dependabot/, 'dependabot author tag is suppressed');
+  t.equal(ctx.githubRest.pulls.get.callCount, 2, 'pulls.get called once per unique PR number');
+  const summary = ctx.core.setOutput.getCalls().find(c => c.args[0] === 'merge_commits_summary').args[1];
+  t.match(summary, /#227/, 'PR #227 listed');
+  t.match(summary, /#229/, 'PR #229 listed');
+  t.notMatch(summary, /by @dependabot/, 'dependabot author is suppressed (isLoginPermissible)');
 });
 
-tap.test('drops PRs that targeted a different base branch', async t => {
+tap.test('extracts PR numbers from squash-merge commit messages', async t => {
   const ctx = buildContext({
     compareCommitsWithBasehead: sinon.stub().resolves({
       data: {
         commits: [
           {
-            sha: 'cccccccccccccccccccccccccccccccccccccccc',
-            commit: { author: { date: '2026-04-27T17:00:00Z' } },
+            sha: 'e'.repeat(40),
+            commit: { author: { date: '2026-04-27T17:00:00Z' }, message: 'feat: add a thing (#42)' },
             author: { login: 'pkat' },
+            parents: [{}],
           },
         ],
       },
     }),
-    graphql: sinon.stub().resolves({
-      repository: {
-        c0: {
-          associatedPullRequests: {
-            nodes: [
-              {
-                number: 999,
-                title: 'merged into a feature branch, not master',
-                url: 'https://example/pull/999',
-                mergedAt: '2026-04-27T17:00:00Z',
-                closedAt: '2026-04-27T17:00:00Z',
-                baseRefName: 'feature/foo',
-                author: { login: 'pkat' },
-              },
-            ],
-          },
-        },
+    pullsGet: sinon.stub().resolves({
+      data: {
+        number: 42,
+        title: 'feat: add a thing',
+        html_url: 'https://example/pull/42',
+        merged_at: '2026-04-27T17:00:00Z',
+        closed_at: '2026-04-27T17:00:00Z',
+        base: { ref: 'master' },
+        user: { login: 'pkat' },
+      },
+    }),
+  });
+
+  await main({ ctx });
+
+  t.equal(ctx.githubRest.pulls.get.firstCall.args[0].pull_number, 42, 'extracts (#42) from squash subject');
+  const summary = ctx.core.setOutput.getCalls().find(c => c.args[0] === 'merge_commits_summary').args[1];
+  t.match(summary, /by @pkat/, 'non-bot author is shown');
+});
+
+tap.test('drops PRs whose base branch does not match describe_merges_into_branch', async t => {
+  const ctx = buildContext({
+    compareCommitsWithBasehead: sinon.stub().resolves({
+      data: {
+        commits: [fakeMergeCommit({ sha: 'f'.repeat(40), prNumber: 999 })],
+      },
+    }),
+    pullsGet: sinon.stub().resolves({
+      data: {
+        number: 999,
+        merged_at: '2026-04-27T17:00:00Z',
+        closed_at: '2026-04-27T17:00:00Z',
+        base: { ref: 'feature/foo' },
+        user: { login: 'pkat' },
       },
     }),
   });
@@ -170,4 +168,52 @@ tap.test('drops PRs that targeted a different base branch', async t => {
 
   const summaryJsonCall = ctx.core.setOutput.getCalls().find(c => c.args[0] === 'merge_commits_summary_json');
   t.equal(summaryJsonCall.args[1], '{}', 'PR with non-master base is filtered out');
+});
+
+tap.test('logs a warning and emits {} when pulls.get fails for the only PR', async t => {
+  const ctx = buildContext({
+    compareCommitsWithBasehead: sinon.stub().resolves({
+      data: {
+        commits: [fakeMergeCommit({ sha: '0'.repeat(40), prNumber: 7 })],
+      },
+    }),
+    pullsGet: sinon.stub().rejects(new Error('500 Internal Server Error')),
+  });
+
+  await main({ ctx });
+
+  t.notOk(ctx.core.setFailed.called, 'main does not fail');
+  t.ok(ctx.core.warning.called, 'warning logged');
+  const summaryJsonCall = ctx.core.setOutput.getCalls().find(c => c.args[0] === 'merge_commits_summary_json');
+  t.equal(summaryJsonCall.args[1], '{}', 'preserves existing body when lookup fails');
+});
+
+tap.test('skips commits without a parseable PR ref instead of failing', async t => {
+  const ctx = buildContext({
+    compareCommitsWithBasehead: sinon.stub().resolves({
+      data: {
+        commits: [
+          fakeAuthorCommit({ sha: '1'.repeat(40), msg: 'direct push to master' }),
+          fakeMergeCommit({ sha: '2'.repeat(40), prNumber: 100 }),
+        ],
+      },
+    }),
+    pullsGet: sinon.stub().resolves({
+      data: {
+        number: 100,
+        title: 'real PR',
+        html_url: 'https://example/pull/100',
+        merged_at: '2026-04-27T17:00:00Z',
+        closed_at: '2026-04-27T17:00:00Z',
+        base: { ref: 'master' },
+        user: { login: 'pkat' },
+      },
+    }),
+  });
+
+  await main({ ctx });
+
+  t.equal(ctx.githubRest.pulls.get.callCount, 1, 'only the parseable PR triggers a lookup');
+  const summary = ctx.core.setOutput.getCalls().find(c => c.args[0] === 'merge_commits_summary').args[1];
+  t.match(summary, /#100/);
 });

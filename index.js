@@ -17,23 +17,15 @@ module.exports = { main };
  */
 
 if (require.main === module) {
-  const octokit = github.getOctokit(core.getInput('github_token', { required: true }));
-  main({
-    ctx: {
-      core,
-      githubRest: octokit.rest,
-      graphql: octokit.graphql,
-      owner: github.context.repo.owner,
-      repo: github.context.repo.repo,
-    },
-  }).catch();
+  const githubRest = github.getOctokit(core.getInput('github_token', { required: true })).rest;
+  main({ ctx: { core, githubRest, owner: github.context.repo.owner, repo: github.context.repo.repo } }).catch();
 }
 
 /**
  * @param {Context} ctx
  */
 async function main({ ctx }) {
-  const { core, githubRest, graphql, owner, repo } = ctx;
+  const { core, githubRest, owner, repo } = ctx;
   try {
     const headRef = core.getInput('pr_source_branch', { required: true });
     const baseRef = core.getInput('pr_destination_branch', { required: true });
@@ -46,7 +38,7 @@ async function main({ ctx }) {
 
     const committers = new Set();
     const approversWithNewCommits = new Set();
-    const commitShas = [];
+    const allCommits = [];
 
     let page = 1;
     const per_page = 15;
@@ -63,9 +55,10 @@ async function main({ ctx }) {
       });
       core.info(`Found ${commits.length} commits on page ${page} of commits for ${headRef}...${baseRef}`);
 
-      for (const { sha, commit, author } of commits) {
-        commitShas.push(sha);
+      for (const c of commits) {
+        allCommits.push(c);
 
+        const { author, commit } = c;
         if (author && author.login && isLoginPermissible(author.login)) {
           committers.add(author.login);
           if (
@@ -83,14 +76,14 @@ async function main({ ctx }) {
       page++;
     }
 
-    const prNumberToPr = await lookupAssociatedPRs({ ctx, commitShas, mergeDescriptionBranch });
+    const prNumberToPr = await lookupAssociatedPRs({ ctx, commits: allCommits, mergeDescriptionBranch });
 
     const prLines = [];
     for (const pr of [...prNumberToPr.values()].sort(byClosedAtDesc)) {
-      if (pr.author && pr.author.login && isLoginPermissible(pr.author.login)) {
-        prLines.push(`[#${pr.number}](${pr.url}) by @${pr.author.login}: ${pr.title}`);
+      if (pr.user && pr.user.login && isLoginPermissible(pr.user.login)) {
+        prLines.push(`[#${pr.number}](${pr.html_url}) by @${pr.user.login}: ${pr.title}`);
       } else {
-        prLines.push(`[#${pr.number}](${pr.url}): ${pr.title}`);
+        prLines.push(`[#${pr.number}](${pr.html_url}): ${pr.title}`);
       }
     }
 
@@ -131,77 +124,61 @@ function isLoginPermissible(login) {
 }
 
 function byClosedAtDesc(a, b) {
-  if (a.closedAt < b.closedAt) {
+  if (a.closed_at < b.closed_at) {
     return -1;
   }
-  if (a.closedAt > b.closedAt) {
+  if (a.closed_at > b.closed_at) {
     return 1;
   }
   return 0;
 }
 
 /**
- * Resolve which merged PRs introduced the given commits, batching lookups via GraphQL.
+ * Resolve which merged PRs introduced the given commits.
  *
- * The REST endpoint `repos.listPullRequestsAssociatedWithCommit` is intermittently 500 on
- * some repositories (returns 200 ~half the time, 500 the other half). GraphQL
- * `associatedPullRequests` returns the same data reliably and lets us batch many commits
- * per request.
+ * We extract PR numbers directly from merge commit messages rather than calling
+ * `repos.listPullRequestsAssociatedWithCommit` or GraphQL `associatedPullRequests`.
+ * Both endpoints depend on a backend index that lags 20+ minutes after a merge and
+ * also returns intermittent 500s, so just-merged PRs would be silently dropped from
+ * the summary. Commit messages are git data — present immediately and never flaky.
  *
- * @param {Context & {graphql: Function}} ctx.ctx
- * @param {String[]} ctx.commitShas
- * @param {String} ctx.mergeDescriptionBranch
+ * Standard merge commits ("Merge pull request #N from ...") and squash-merge commits
+ * ("Title (#N)") are both matched. Rebase merges (which don't preserve a PR ref in
+ * any commit message) are not detected; this action's primary use case is promotion
+ * PRs in repos that use merge or squash strategies.
+ *
+ * @param {Object} args
+ * @param {Context} args.ctx
+ * @param {Array} args.commits  raw items from compareCommitsWithBasehead
+ * @param {String} args.mergeDescriptionBranch
  */
-async function lookupAssociatedPRs({ ctx, commitShas, mergeDescriptionBranch }) {
-  const { core, graphql, owner, repo } = ctx;
-  const prNumberToPr = new Map();
-  if (commitShas.length === 0) {
-    return prNumberToPr;
+async function lookupAssociatedPRs({ ctx, commits, mergeDescriptionBranch }) {
+  const { core, githubRest, owner, repo } = ctx;
+  const prNumbers = new Set();
+
+  for (const c of commits) {
+    const subject = c.commit && c.commit.message ? c.commit.message.split('\n')[0] : '';
+    const standardMerge = subject.match(/^Merge pull request #(\d+)/);
+    const squashMerge = subject.match(/\(#(\d+)\)\s*$/);
+    if (standardMerge) {
+      prNumbers.add(Number(standardMerge[1]));
+    } else if (squashMerge) {
+      prNumbers.add(Number(squashMerge[1]));
+    }
   }
 
-  const CHUNK_SIZE = 50;
-  for (let i = 0; i < commitShas.length; i += CHUNK_SIZE) {
-    const chunk = commitShas.slice(i, i + CHUNK_SIZE);
-    const aliases = chunk
-      .map(
-        (sha, j) => `c${j}: object(oid: "${sha}") {
-          ... on Commit {
-            associatedPullRequests(first: 5) {
-              nodes {
-                number
-                title
-                url
-                mergedAt
-                closedAt
-                baseRefName
-                author { login }
-              }
-            }
-          }
-        }`
-      )
-      .join('\n');
-    const query = `query { repository(owner: "${owner}", name: "${repo}") { ${aliases} } }`;
-
-    let result;
+  const prNumberToPr = new Map();
+  for (const num of prNumbers) {
+    let pr;
     try {
-      result = await graphql(query);
+      const result = await githubRest.pulls.get({ owner, repo, pull_number: num });
+      pr = result.data;
     } catch (err) {
-      core.warning(`GraphQL associated-PR lookup failed for batch starting at commit index ${i}: ${err.message}`);
+      core.warning(`Failed to fetch PR #${num}: ${err.message}`);
       continue;
     }
-
-    const repoData = (result && result.repository) || {};
-    for (const key of Object.keys(repoData)) {
-      const obj = repoData[key];
-      if (!obj || !obj.associatedPullRequests) {
-        continue;
-      }
-      for (const pr of obj.associatedPullRequests.nodes) {
-        if (pr.mergedAt && pr.baseRefName === mergeDescriptionBranch) {
-          prNumberToPr.set(pr.number, pr);
-        }
-      }
+    if (pr.merged_at && pr.base && pr.base.ref === mergeDescriptionBranch) {
+      prNumberToPr.set(pr.number, pr);
     }
   }
 
