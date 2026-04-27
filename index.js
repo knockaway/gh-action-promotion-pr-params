@@ -56,7 +56,7 @@ async function main({ ctx }) {
       core.info(`Found ${commits.length} commits on page ${page} of commits for ${headRef}...${baseRef}`);
 
       for (const { sha, commit, author } of commits) {
-        commitShas.push(sha.slice(0, 7));
+        commitShas.push(sha);
 
         if (author && author.login && isLoginPermissible(author.login)) {
           committers.add(author.login);
@@ -76,27 +76,16 @@ async function main({ ctx }) {
     }
 
     const prNumberToPr = new Map();
-    while (commitShas.length > 0) {
-      let q = `repo:${owner}/${repo}+type:pr+is:merged+base:${mergeDescriptionBranch}`;
-
-      // max query search length is 256
-      while (commitShas.length > 0 && q.length < 256 - 8) {
-        q += `+${commitShas.pop()}`;
-      }
-
-      page = 1;
-      while (true) {
-        core.debug(`Fetching page ${page} of PRs matching q: ${q}`);
-        const {
-          data: { incomplete_results, items: prs },
-        } = await githubRest.search.issuesAndPullRequests({ q, per_page, page });
-
-        for (const pr of prs) {
+    for (const sha of commitShas) {
+      core.debug(`Looking up PRs associated with commit ${sha}`);
+      const { data: prs } = await githubRest.repos.listPullRequestsAssociatedWithCommit({
+        owner,
+        repo,
+        commit_sha: sha,
+      });
+      for (const pr of prs) {
+        if (pr.merged_at && pr.base && pr.base.ref === mergeDescriptionBranch) {
           prNumberToPr.set(pr.number, pr);
-        }
-
-        if (!incomplete_results) {
-          break;
         }
       }
     }
@@ -120,7 +109,10 @@ async function main({ ctx }) {
     core.info(`Found these reviewers that approved and then added new commits:\n${approversWithNewCommitsCsv}`);
 
     core.setOutput('merge_commits_summary', commitSummary);
-    core.setOutput('merge_commits_summary_json', JSON.stringify({ PROMOTION_PR_COMMIT_SUMMARY: commitSummary }));
+    // When no PRs were resolved, emit empty template vars so callers using gh-action-upsert-pr leave
+    // the existing PR body untouched instead of clobbering a previously-populated summary.
+    const summaryJson = prLines.length === 0 ? '{}' : JSON.stringify({ PROMOTION_PR_COMMIT_SUMMARY: commitSummary });
+    core.setOutput('merge_commits_summary_json', summaryJson);
     core.setOutput('committers_csv', committersCsv);
     core.setOutput('approvers_with_new_commits_csv', approversWithNewCommitsCsv);
   } catch (error) {
